@@ -182,7 +182,7 @@ SETUP_ADVICE_TH = {
 }
 
 # ตั้งค่าหน้าเพจ Streamlit (สีหลักอยู่ใน .streamlit/config.toml)
-st.set_page_config(page_title="Mindful Chewing", page_icon="🍽️", layout="centered",
+st.set_page_config(page_title="Mindful Chewing", page_icon="🍽️", layout="wide",
                    initial_sidebar_state="collapsed")
 
 # หน้าตาแบบเรียบ มืด มีแสงฟ้านุ่มๆ ปุ่มทรงแคปซูล การ์ดโปร่งแสง (อ้างอิงสไตล์ vibrant.noomoagency.com)
@@ -202,7 +202,8 @@ html, body, .stApp, [data-testid="stMarkdownContainer"], button, input, label, p
     #05070D;
   background-attachment: fixed; }
 [data-testid="stHeader"] { background: transparent; }
-.block-container { padding-top: 3.5rem; max-width: 760px; }
+/* กว้างพอให้วิดีโอใหญ่บนจอคอม แต่ไม่ยืดจนหน้าตาเต็มจอเกินไป */
+.block-container { padding-top: 3.5rem; max-width: 1120px; padding-left: 1.5rem; padding-right: 1.5rem; }
 .hero { text-align: center; margin: 0.5rem 0 1.8rem; animation: fadeUp .8s ease both; }
 .eyebrow { font-family: 'Ubuntu Mono', monospace !important; text-transform: uppercase; letter-spacing: .22em;
   font-size: .72rem; color: var(--accent-soft); display: inline-block; padding: .35rem .9rem;
