@@ -1076,21 +1076,24 @@ class ChewProcessor(ChewCounter, VideoProcessorBase):
         return av.VideoFrame.from_ndarray(image, format="bgr24")
 
 
-# เส้นทางเชื่อมวิดีโอระหว่างเบราว์เซอร์กับเซิร์ฟเวอร์ เมื่อรันบนเว็บ (เช่น Streamlit Cloud) ต้องมี STUN
-# และบางเครือข่ายต้องมี TURN ด้วย ใส่ใน Secrets ของแอปได้ (TURN_URLS คั่นด้วยจุลภาค, TURN_USERNAME, TURN_CREDENTIAL)
-def ice_servers():
-    servers = [{"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]}]
+# เส้นทางเชื่อมวิดีโอระหว่างเบราว์เซอร์กับเซิร์ฟเวอร์ บนเว็บถ้ามีแค่ STUN การเชื่อมต่ออาจช้ามากหรือไม่ติด
+# (ต้องลองหลายเส้นทางจนหมดเวลา) ถ้ามี TURN จะต่อได้เร็วและแน่นอนกว่า
+# - ค่าตั้งต้น (คืน None): ให้ streamlit-webrtc หา TURN ฟรีเองจาก Secrets/ตัวแปรระบบ เช่น HF_TOKEN (Hugging Face)
+#   หรือ CLOUDFLARE_TURN_KEY_ID + CLOUDFLARE_TURN_KEY_API_TOKEN ถ้าไม่มีจะใช้ STUN ของ Google
+# - หรือใส่ TURN ของตัวเองใน Secrets: TURN_URLS (คั่นด้วยจุลภาค), TURN_USERNAME, TURN_CREDENTIAL
+def rtc_configuration():
     try:
         turn = st.secrets.get("TURN_URLS")
-        if turn:
-            servers.append({"urls": [u.strip() for u in turn.split(",")],
-                            "username": st.secrets.get("TURN_USERNAME", ""),
-                            "credential": st.secrets.get("TURN_CREDENTIAL", "")})
-    except (FileNotFoundError, KeyError, AttributeError):
-        pass
     except Exception:  # ไม่มีไฟล์ secrets ตอนรันในเครื่อง
-        pass
-    return servers
+        turn = None
+    if not turn:
+        return None
+    return {"iceServers": [
+        {"urls": ["stun:stun.l.google.com:19302"]},
+        {"urls": [u.strip() for u in turn.split(",")],
+         "username": st.secrets.get("TURN_USERNAME", ""),
+         "credential": st.secrets.get("TURN_CREDENTIAL", "")},
+    ]}
 
 
 # สร้าง WebRTC Streamer บนหน้าเว็บ
@@ -1098,8 +1101,12 @@ ctx = webrtc_streamer(
     key="chew-counter",
     mode=WebRtcMode.SENDRECV,
     video_processor_factory=lambda: ChewProcessor(meal_log),
-    media_stream_constraints={"video": True, "audio": False},
-    rtc_configuration={"iceServers": ice_servers()},
+    # ขอภาพ 640x480 ราว 24 เฟรม/วินาที พอสำหรับจับหน้า กล้องมือถือบางรุ่นส่ง 720p ขึ้นไป ทำให้เข้ารหัส
+    # ส่งขึ้นเซิร์ฟเวอร์ และประมวลผลช้า (บนเว็บ CPU ของเซิร์ฟเวอร์ฟรีมีน้อย)
+    media_stream_constraints={"video": {"width": {"ideal": 640}, "height": {"ideal": 480},
+                                        "frameRate": {"ideal": 24, "max": 30}},
+                              "audio": False},
+    rtc_configuration=rtc_configuration(),
     video_html_attrs={"style": {"width": "100%", "borderRadius": "24px"}, "autoPlay": True,
                       "controls": False, "muted": True},
     translations={"start": "เริ่มใช้งาน", "stop": "หยุด", "select_device": "เลือกกล้อง",
@@ -1108,6 +1115,9 @@ ctx = webrtc_streamer(
                   "device_not_available": "ไม่พบกล้อง", "device_access_denied": "ไม่ได้รับอนุญาตให้ใช้กล้อง"},
     async_processing=True
 )
+
+if ctx.state.signalling and not ctx.state.playing:
+    st.caption("กำลังเชื่อมต่อวิดีโอกับเซิร์ฟเวอร์... ครั้งแรกอาจใช้เวลาสักครู่")
 
 # ส่งค่าตั้งค่าและคำสั่งปุ่มข้าม Thread ไปยัง VideoProcessor
 if ctx.video_processor:

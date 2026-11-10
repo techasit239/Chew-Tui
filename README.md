@@ -27,14 +27,33 @@ streamlit run app.py
 3. Advanced settings → **Python version 3.11** (mediapipe 0.10.21 ยังไม่รองรับ 3.13)
 4. Deploy
 
-ถ้ากด "เริ่มใช้งาน" แล้ววิดีโอค้าง (บางเครือข่ายต่อวิดีโอตรงไม่ได้) ให้ใส่ TURN server ใน
-App settings → Secrets:
+### กล้องเปิดช้า / วิดีโอค้าง
 
-```toml
-TURN_URLS = "turn:your-turn-server:3478,turns:your-turn-server:443"
-TURN_USERNAME = "..."
-TURN_CREDENTIAL = "..."
-```
+ถ้ามีแค่ STUN เบราว์เซอร์กับเซิร์ฟเวอร์ต้องลองหาเส้นทางหลายแบบจนกว่าจะเจอ บางเครือข่าย (มือถือ, Wi-Fi องค์กร)
+จะช้ามากหรือต่อไม่ติด ใส่ TURN server ใน App settings → Secrets แล้วจะต่อได้เร็วขึ้น (เลือกอย่างใดอย่างหนึ่ง):
+
+1. **Hugging Face (ฟรี ง่ายที่สุด)** สมัครที่ huggingface.co → Settings → Access Tokens → สร้าง token แบบ Read
+
+   ```toml
+   HF_TOKEN = "hf_..."
+   ```
+
+2. **Cloudflare Realtime TURN** (ฟรีตามโควตา)
+
+   ```toml
+   CLOUDFLARE_TURN_KEY_ID = "..."
+   CLOUDFLARE_TURN_KEY_API_TOKEN = "..."
+   ```
+
+3. **TURN ของตัวเอง**
+
+   ```toml
+   TURN_URLS = "turn:your-turn-server:3478,turns:your-turn-server:443"
+   TURN_USERNAME = "..."
+   TURN_CREDENTIAL = "..."
+   ```
+
+แอปบน Streamlit Cloud ที่ไม่มีคนใช้สักพักจะหลับ การเปิดครั้งแรกหลังจากนั้นจะช้ากว่าปกติ
 
 ## จูนค่าด้วยข้อมูลของตัวเอง (ในเครื่อง)
 
