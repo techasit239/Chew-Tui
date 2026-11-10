@@ -79,6 +79,14 @@ def key_of(p):
 
 
 # รอบที่ข้อมูลไม่น่าเชื่อ จะทำให้หาค่าผิดทาง จึงไม่ใช้ (คืนเหตุผล หรือ None ถ้าใช้ได้)
+TRIAL_TYPE_TH = {"chew": "เคี้ยว", "idle": "นั่งนิ่ง", "talk": "พูดคุย"}
+
+
+def trial_type(t):
+    """ประเภทรอบ: chew / idle / talk (ไฟล์ก่อนมีรอบพูดคุย: จริง = 0 ถือเป็นนั่งนิ่ง)"""
+    return t.get("trial_type") or ("idle" if t["actual_chews"] == 0 else "chew")
+
+
 def quality_problem(t):
     fr = t["frames"]
     if len(fr["t"]) < 30:
@@ -263,7 +271,8 @@ def real_bite_openings(trials):
     """
     peaks = []
     for t in trials:
-        if t.get("format", 1) < 2 or t["start_state"]["reason"] != "new_bite":
+        # รอบพูดคุยไม่มีอาหาร ถ้าเริ่มจาก "คำใหม่" แปลว่าอ้าปากพูดกว้างจนแอปจับผิด ไม่ใช่การตักอาหารจริง
+        if t.get("format", 1) < 2 or t["start_state"]["reason"] != "new_bite" or trial_type(t) == "talk":
             continue
         fr, base, sm, best = t["frames"], t["baseline"]["lips"], None, None
         for ts, v in zip(fr["t"], fr["lips"]):
@@ -304,10 +313,76 @@ def score(errors, actuals):
     return sum(abs(e) * wi for e, wi in zip(errors, w)) / sum(w)
 
 
+# ---------- Precision / Recall / F1 / Specificity ----------
+# ข้อมูลทดลองรู้แค่ "จำนวน" ที่เคี้ยวจริงต่อรอบ ไม่รู้เวลาของการเคี้ยวแต่ละครั้ง จึงนับแบบอิงจำนวน (count-based):
+#   รอบเคี้ยว:          TP = min(นับได้, จริง), FN = จริงที่นับขาด, FP = ที่นับเกิน
+#   รอบนั่งนิ่ง/พูดคุย:   ทุกครั้งที่นับได้ = FP
+#   Specificity: แบ่งเวลาของรอบนั่งนิ่ง/พูดคุยเป็นช่อง NEG_WINDOW วินาที (ราวหนึ่งจังหวะเคี้ยว) = ค่าลบทั้งหมด
+#                ช่องที่ไม่ถูกนับ = TN, Specificity = TN / (TN + FP)
+# ข้อจำกัด: ในรอบเคี้ยว ถ้านับขาด 1 ครั้งแล้วนับเกินอีก 1 ครั้ง จะหักล้างกัน ค่าที่ได้จึงดีกว่าความจริงได้เล็กน้อย
+NEG_WINDOW = 1.0
+OBJECTIVE = "balanced"  # ตั้งจาก --objective: "balanced" = เน้น F1 + Specificity, "mae" = คลาดเฉลี่ยแบบเดิม
+
+
+def active_seconds(t):
+    """เวลาที่แอปเปิดนับได้จริงในรอบนี้ (ไม่รวมช่วงหน้าหลุด/หันเกินกำหนด) ใช้เป็นจำนวนช่องค่าลบ"""
+    if "_active_sec" not in t:
+        fr = t["frames"]
+        fmt2 = t.get("format", 1) >= 2
+        total = 0.0
+        for i in range(1, len(fr["t"])):
+            usable = fr["lips"][i] is not None and (fr["skip"][i] not in ("pose", "face") if fmt2
+                                                    else fr["counted"][i])
+            if usable:
+                total += min(fr["t"][i] - fr["t"][i - 1], 1.0)
+        t["_active_sec"] = total
+    return t["_active_sec"]
+
+
+def detection_metrics(counts, trials):
+    tp = fp = fn = fp_neg = 0
+    neg_windows, neg_secs = 0.0, 0.0
+    for c, t in zip(counts, trials):
+        a = t["actual_chews"]
+        if a > 0:
+            tp += min(c, a)
+            fn += max(0, a - c)
+            fp += max(0, c - a)
+        else:
+            fp += c
+            fp_neg += c
+            secs = active_seconds(t)
+            neg_secs += secs
+            neg_windows += secs / NEG_WINDOW
+    has_pos = tp + fn > 0
+    has_neg = neg_windows > 0
+    precision = tp / (tp + fp) if tp + fp else None
+    recall = tp / (tp + fn) if has_pos else None
+    # F1 = 2TP / (2TP + FP + FN) (เท่ากับค่าเฉลี่ยฮาร์มอนิกของ Precision กับ Recall และไม่หารด้วยศูนย์)
+    f1 = 2 * tp / (2 * tp + fp + fn) if has_pos else None
+    specificity = max(0.0, neg_windows - fp_neg) / neg_windows if has_neg else None
+    return {
+        "tp": tp, "fp": fp, "fn": fn,
+        "precision": precision, "recall": recall, "f1": f1, "specificity": specificity,
+        # นับผิดต่อนาทีตอนไม่ได้เคี้ยว อ่านเข้าใจง่ายกว่า Specificity
+        "fp_per_min": fp_neg / (neg_secs / 60) if neg_secs > 0 else None,
+    }
+
+
+def loss(counts, trials):
+    """ค่าที่ tune.py พยายามทำให้ต่ำที่สุด"""
+    if OBJECTIVE == "mae":
+        return score([c - t["actual_chews"] for c, t in zip(counts, trials)],
+                     [t["actual_chews"] for t in trials])
+    # เคี้ยวต้องนับ (F1 รวม Precision กับ Recall) และไม่เคี้ยวต้องไม่นับ (Specificity) ให้น้ำหนักเท่ากัน
+    m = detection_metrics(counts, trials)
+    parts = [v for v in (m["f1"], m["specificity"]) if v is not None]
+    return 100 * (1 - sum(parts) / len(parts))
+
+
 def fast_score(fast_trials, p):
     s = to_settings(p)
-    errors = [ft.count(s) - ft.actual for ft in fast_trials]
-    return score(errors, [ft.actual for ft in fast_trials])
+    return loss([ft.count(s) for ft in fast_trials], [ft.trial for ft in fast_trials])
 
 
 # ---------- ตรวจจริงด้วยโค้ดเดียวกับในแอป ----------
@@ -325,15 +400,66 @@ def _exact_counts(p):
     return [replay_trial(t, s, analyze_every=2) for t in _WORKER_TRIALS]
 
 
+def count_accuracy(counted, actual):
+    """ความแม่นของการนับหนึ่งรอบ (%) = 100 × (1 − |นับได้ − จริง| / จริง) ไม่ต่ำกว่า 0
+    ใช้ได้เฉพาะรอบที่เคี้ยวจริง (จริง > 0) เช่น จริง 10 นับได้ 9 หรือ 11 = 90%"""
+    return max(0.0, 1 - abs(counted - actual) / actual) * 100
+
+
 def summarize(counts, trials):
     errors = [c - t["actual_chews"] for c, t in zip(counts, trials)]
-    return {
-        "score": round(score(errors, [t["actual_chews"] for t in trials]), 3),
+    chew = [(c, t["actual_chews"]) for c, t in zip(counts, trials) if t["actual_chews"] > 0]
+    zero = [c for c, t in zip(counts, trials) if t["actual_chews"] == 0]
+    det = detection_metrics(counts, trials)
+
+    def pct(v):
+        return None if v is None else round(100 * v, 1)
+
+    out = {
+        "score": round(loss(counts, trials), 3),
+        "objective": OBJECTIVE,
+        "precision_pct": pct(det["precision"]),
+        "recall_pct": pct(det["recall"]),
+        "f1_pct": pct(det["f1"]),
+        "specificity_pct": pct(det["specificity"]),
+        "fp_per_min": None if det["fp_per_min"] is None else round(det["fp_per_min"], 2),
+        "tp": det["tp"], "fp": det["fp"], "fn": det["fn"],
+        # Accuracy ของรอบเคี้ยว: เฉลี่ยความแม่นรายรอบ (= 100 − MAPE เมื่อไม่มีรอบที่ผิดเกิน 100%)
+        "accuracy_pct": round(float(np.mean([count_accuracy(c, a) for c, a in chew])), 1) if chew else None,
+        # Accuracy รวม: 1 − ผลรวมความคลาด / ผลรวมจำนวนจริง (รอบยาวมีน้ำหนักมากกว่า)
+        "overall_accuracy_pct": (round(max(0.0, 1 - sum(abs(c - a) for c, a in chew)
+                                          / sum(a for _, a in chew)) * 100, 1) if chew else None),
+        # รอบนั่งนิ่ง/พูดคุย: % รอบที่ไม่นับเลย (ตอบถูกว่า "ไม่ได้เคี้ยว")
+        "zero_accuracy_pct": round(100 * float(np.mean([c == 0 for c in zero])), 1) if zero else None,
         "mae": round(float(np.mean(np.abs(errors))), 2),
         "exact_pct": round(100 * float(np.mean([e == 0 for e in errors])), 1),
         "within1_pct": round(100 * float(np.mean([abs(e) <= 1 for e in errors])), 1),
         "n": len(trials),
     }
+    # แยกตามประเภทรอบ รอบนั่งนิ่ง/พูดคุยจริง = 0 ทุกครั้งที่นับได้จึงเป็นการนับผิด (false positive)
+    by_type = {}
+    for kind in TRIAL_TYPE_TH:
+        e = [err for err, t in zip(errors, trials) if trial_type(t) == kind]
+        if e:
+            acc = [count_accuracy(c, t["actual_chews"]) for c, t in zip(counts, trials)
+                   if trial_type(t) == kind and t["actual_chews"] > 0]
+            sub = [(c, t) for c, t in zip(counts, trials) if trial_type(t) == kind]
+            d = detection_metrics([c for c, _ in sub], [t for _, t in sub])
+            by_type[kind] = {
+                # รอบเคี้ยว: Precision/Recall/F1, รอบนั่งนิ่ง/พูดคุย: Specificity และนับผิดต่อนาที
+                **({"precision_pct": pct(d["precision"]), "recall_pct": pct(d["recall"]), "f1_pct": pct(d["f1"])}
+                   if kind == "chew" else
+                   {"specificity_pct": pct(d["specificity"]),
+                    "fp_per_min": None if d["fp_per_min"] is None else round(d["fp_per_min"], 2)}),
+                # รอบเคี้ยว = ความแม่นของการนับ, รอบนั่งนิ่ง/พูดคุย = % รอบที่ไม่นับเลย
+                "accuracy_pct": (round(float(np.mean(acc)), 1) if acc
+                                 else round(100 * float(np.mean([x == 0 for x in e])), 1)),
+                "mae": round(float(np.mean(np.abs(e))), 2),
+                "exact_pct": round(100 * float(np.mean([x == 0 for x in e])), 1),
+                "n": len(e),
+            }
+    out["by_type"] = by_type
+    return out
 
 
 def main():
@@ -346,7 +472,14 @@ def main():
                     help="สัญญาณที่ไม่ต้องการให้ใช้ (ตั้งต้น: cheeks) ใส่ --exclude เปล่าๆ เพื่อลองทุกสัญญาณ")
     ap.add_argument("--all-formats", action="store_true",
                     help="ใช้ไฟล์รุ่นเก่าด้วย (บันทึกก่อนแก้การจับคำใหม่ ข้อมูลบางช่วงหายไป)")
+    ap.add_argument("--objective", choices=["balanced", "mae"], default="balanced",
+                    help="balanced (ตั้งต้น) = เคี้ยวต้องนับ ไม่เคี้ยวต้องไม่นับ: ลด 1 − (F1 + Specificity)/2, "
+                         "mae = คลาดเฉลี่ยต่อรอบแบบเดิม (รอบนั่งนิ่งน้ำหนัก 2 เท่า)")
     args = ap.parse_args()
+    global OBJECTIVE
+    OBJECTIVE = args.objective
+    print("เป้าหมายการจูน: " + ("เคี้ยวต้องนับ ไม่เคี้ยวต้องไม่นับ (F1 + Specificity)" if OBJECTIVE == "balanced"
+                                 else "คลาดเฉลี่ยต่อรอบ (MAE)"))
     rng = random.Random(args.seed)
     if args.exclude:
         SPACE["enabled"] = [e for e in SPACE["enabled"] if not set(e) & set(args.exclude)]
@@ -379,11 +512,19 @@ def main():
     def rank_key(score_value, p):
         return score_value + 1e-3 * abs(p["bite"] - preferred)
 
-    order = list(range(len(trials)))
-    rng.shuffle(order)
-    n_test = max(2, round(len(trials) * 0.3)) if len(trials) >= 10 else 0
-    test = [trials[i] for i in order[:n_test]]
-    train = [trials[i] for i in order[n_test:]]
+    # แบ่ง 30% เป็นชุดทดสอบแยกตามประเภทรอบ (stratified) รอบพูดคุยที่มีน้อยจะได้อยู่ทั้งสองชุด
+    test, train = [], []
+    if len(trials) >= 10:
+        for kind in TRIAL_TYPE_TH:
+            group = [t for t in trials if trial_type(t) == kind]
+            rng.shuffle(group)
+            n_test = round(len(group) * 0.3) if len(group) >= 2 else 0
+            test += group[:n_test]
+            train += group[n_test:]
+        if len(test) < 2:
+            train, test = train[2:], test + train[:2]
+    else:
+        train = list(trials)
     print(f"ชุดจูน {len(train)} รอบ, ชุดทดสอบ {len(test)} รอบ"
           + ("" if test else " (ข้อมูลน้อยกว่า 10 รอบ จึงไม่มีชุดทดสอบ ผลอาจดูดีเกินจริง)"))
 
@@ -462,12 +603,39 @@ def main():
     OUT_FILE.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print("\nผลลัพธ์ (คลาดเฉลี่ยต่อรอบ | นับตรงเป๊ะ | คลาดไม่เกิน ±1)")
+    print("  Accuracy: รอบเคี้ยว = 100 × (1 − |นับได้ − จริง| / จริง), "
+          "รอบนั่งนิ่ง/พูดคุย = % รอบที่ไม่นับเลย")
+    print(f"  Precision/Recall/F1 อิงจำนวนต่อรอบ, Specificity = ช่องเวลา {NEG_WINDOW:g} วินาทีตอนไม่เคี้ยวที่ไม่ถูกนับ")
     for name, label in (("best", "ค่าที่จูนได้"), ("current", "ค่าที่ใช้อยู่"), ("default", "ค่าตั้งต้น")):
         for part in ("train", "test"):
             if part in report[name]:
                 m = report[name][part]
                 print(f"  {label:12s} {'ชุดจูน' if part == 'train' else 'ชุดทดสอบ':8s} "
                       f"{m['mae']:5.2f} ครั้ง | {m['exact_pct']:5.1f}% | {m['within1_pct']:5.1f}%  ({m['n']} รอบ)")
+                def fmt(v, unit="%"):
+                    return "  –  " if v is None else f"{v:5.1f}{unit}"
+                print(f"      Precision {fmt(m['precision_pct'])} | Recall {fmt(m['recall_pct'])} | "
+                      f"F1 {fmt(m['f1_pct'])} | Specificity {fmt(m['specificity_pct'])}"
+                      + ("" if m["fp_per_min"] is None
+                         else f" | ไม่เคี้ยวแต่นับ {m['fp_per_min']:.2f} ครั้ง/นาที")
+                      + f"  (TP {m['tp']} FP {m['fp']} FN {m['fn']})")
+                if m["accuracy_pct"] is not None:
+                    print(f"      Accuracy รอบเคี้ยว {m['accuracy_pct']:5.1f}% (เฉลี่ยรายรอบ) | "
+                          f"{m['overall_accuracy_pct']:5.1f}% (รวมทุกครั้ง)")
+                for kind, k in m["by_type"].items():
+                    print(f"      └ {TRIAL_TYPE_TH[kind]:8s} Accuracy {k['accuracy_pct']:5.1f}% | "
+                          f"คลาดเฉลี่ย {k['mae']:5.2f} ครั้ง | ตรงเป๊ะ {k['exact_pct']:5.1f}%  ({k['n']} รอบ)")
+                    if kind == "chew":
+                        print(f"        Precision {fmt(k['precision_pct'])} | Recall {fmt(k['recall_pct'])} | "
+                              f"F1 {fmt(k['f1_pct'])}")
+                    else:
+                        print(f"        Specificity {fmt(k['specificity_pct'])}"
+                              + ("" if k["fp_per_min"] is None
+                                 else f" | นับผิด {k['fp_per_min']:.2f} ครั้ง/นาที"))
+    talk_n = sum(trial_type(t) == "talk" for t in trials)
+    if talk_n == 0:
+        print("\nยังไม่มีรอบพูดคุย: ในโหมดทดลองเลือกประเภทรอบ 'พูดคุย' แล้วเก็บสัก 8–10 รอบ "
+              "ค่าที่จูนจะได้ไม่นับตอนพูด")
     print("\nค่าที่จูนได้:")
     print(f"  วิธีนับ: {best_settings['method']}  สัญญาณ: {', '.join(best_settings['enabled'])}")
     print(f"  ริมฝีปาก {best_p['lips_low']}-{best_p['lips_high']}%  คางขึ้นลง {best_p['chin_v']}%  "

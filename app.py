@@ -269,6 +269,8 @@ st.markdown(
 )
 
 METHOD_LABELS = {"peaks": "กรองความถี่ + ยอดคลื่น", "threshold": "เกณฑ์ (แบบเดิม)"}
+# ประเภทรอบในโหมดทดลอง (บันทึกลงไฟล์ให้ tune.py รายงานผลแยกกัน)
+TRIAL_TYPE_LABELS = {"chew": "เคี้ยว", "idle": "นั่งนิ่ง", "talk": "พูดคุย"}
 
 
 # ค่าของวิธีนับ (รูปแบบเดียวกับ chew_counter / best_settings.json) -> ค่าของแถบเลื่อนแต่ละตัว
@@ -407,11 +409,23 @@ with st.sidebar:
         help="ทุกแถวจะมีคอลัมน์ actual_chews (จำนวนจริง) และ error (นับได้ − จริง) ใช้เทียบความแม่นยำ "
              "และสัญญาณรายเฟรมของทุกรอบจะถูกบันทึกลง data/raw ให้ tune.py ใช้หาค่าที่ดีที่สุด (ไม่เก็บภาพ)",
     )
-    actual_chews = st.number_input(
-        "เคี้ยวจริงรอบละกี่ครั้ง", 0, 100, 10, disabled=not record_actual,
-        help="ทุกครั้งที่แอปนับได้ วงแหวนจะกะพริบขาวพร้อม +1 ถ้าเคี้ยวแล้วไม่กะพริบ = แอปนับพลาด "
-             "ใส่ 0 สำหรับรอบนั่งนิ่งหรือรอบพูดคุย (ช่วยให้ tune.py รู้ว่าไม่ควรนับตอนไหน)",
+    trial_type_label = st.radio(
+        "ประเภทรอบ", list(TRIAL_TYPE_LABELS.values()), disabled=not record_actual, horizontal=True,
+        help="เคี้ยว = เคี้ยวอาหารจริงตามจำนวนที่ใส่ไว้, นั่งนิ่ง = ไม่ขยับปาก, "
+             "พูดคุย = พูดโดยไม่มีอาหารในปาก ใช้วัดว่าแอปนับการพูดเป็นการเคี้ยวผิดไปกี่ครั้ง "
+             "(นั่งนิ่งและพูดคุย จำนวนจริง = 0 เสมอ)",
     )
+    trial_type = next(k for k, v in TRIAL_TYPE_LABELS.items() if v == trial_type_label)
+    actual_chews = st.number_input(
+        "เคี้ยวจริงรอบละกี่ครั้ง", 0, 100, 10, disabled=not record_actual or trial_type != "chew",
+        help="ทุกครั้งที่แอปนับได้ วงแหวนจะกะพริบขาวพร้อม +1 ถ้าเคี้ยวแล้วไม่กะพริบ = แอปนับพลาด",
+    )
+    if trial_type != "chew":
+        actual_chews = 0
+    if record_actual and trial_type == "talk":
+        st.caption("รอบพูดคุย: ไม่มีอาหารในปาก พูดเป็นประโยคตามปกติราว 15–20 วินาที "
+                   "(เล่าเรื่อง อ่านออกเสียง หรือคุยกับคนข้างๆ) แล้วกด 'เริ่มคำใหม่' เพื่อจบรอบ "
+                   "ทุกครั้งที่วงแหวนกะพริบ = แอปนับการพูดเป็นการเคี้ยวผิด")
     if record_actual:
         n_raw = len(list(RAW_DIR.glob("*.json"))) if RAW_DIR.exists() else 0
         st.caption(f"บันทึกสัญญาณแล้ว {n_raw} รอบ — ได้ 20–30 รอบแล้วดับเบิลคลิก tune.bat")
@@ -465,6 +479,7 @@ class ChewProcessor(ChewCounter, VideoProcessorBase):
         self.pulse_start = None         # เวลาที่เริ่มวงคลื่นกระจายรอบวงแหวน (ทุกครั้งที่นับได้)
         self.setup_report = None
         self.actual_chews = None        # โหมดทดลอง: จำนวนที่เคี้ยวจริงต่อรอบ
+        self.trial_type = "chew"        # โหมดทดลอง: ประเภทรอบ (chew / idle / talk)
         self.flash_count = 0            # จำนวนล่าสุดที่วาดแล้ว ใช้รู้ว่าเพิ่งนับได้
         self.flash_until = 0.0
         self.head_axes_px = None        # แกนหัวที่ฉายลงภาพ ไว้วาดลูกศร
@@ -549,6 +564,7 @@ class ChewProcessor(ChewCounter, VideoProcessorBase):
             "session": self.session_id,
             "start_time": datetime.fromtimestamp(self.bite_start).strftime("%Y-%m-%d %H:%M:%S"),
             "actual_chews": self.actual_chews,
+            "trial_type": self.trial_type,
             "app_count": self.chew_count,
             "ended_by": ended_by,
             "settings": self.settings(),
@@ -579,8 +595,11 @@ class ChewProcessor(ChewCounter, VideoProcessorBase):
             "duration_sec": round(duration, 1),
             "chews_per_min": round(self.chew_count / duration * 60, 1) if duration > 0 else None,
             "paused_sec": round(self.paused_seconds, 1),
+            # เวลาทั้งรอบที่แอปนับได้ (ไม่รวมช่วงหยุดนับ) ใช้คำนวณ Specificity ของรอบนั่งนิ่ง/พูดคุย
+            "active_sec": round(max(0.0, time.time() - self.bite_start - self.paused_seconds), 1),
             "ended_by": ended_by,
-            **({"actual_chews": self.actual_chews, "error": self.chew_count - self.actual_chews}
+            **({"trial_type": self.trial_type, "actual_chews": self.actual_chews,
+                "error": self.chew_count - self.actual_chews}
                if self.actual_chews is not None else {}),
         })
         self.bite_start = None
@@ -824,7 +843,7 @@ class ChewProcessor(ChewCounter, VideoProcessorBase):
 
         return report
 
-    # เงาคนนั่ง (หัว คอ ไหล่) ตำแหน่งและขนาดที่ควรเห็นในภาพ ขยับกล้อง/ที่นั่งให้ตัวจริงทับเงานี้
+    # กรอบคนนั่ง (หัว คอ ไหล่) ตำแหน่งและขนาดที่ควรเห็นในภาพ ขยับกล้อง/ที่นั่งให้ตัวจริงอยู่ในกรอบนี้
     # หัวสูงกว่ากลางภาพเล็กน้อย เหลือที่ใต้คางไว้เผื่อก้มตักอาหาร สีขอบบอกผลตรวจมุมกล้องรวม
     def silhouette_geometry(self, h, w):
         center = (w // 2, int(h * 0.45))
@@ -844,15 +863,7 @@ class ChewProcessor(ChewCounter, VideoProcessorBase):
             color = GUIDE_COLORS["pending"]
         center, ax, ay, neck_top, shoulder_y = self.silhouette_geometry(h, w)
         cx = center[0]
-        neck = np.array([(cx - ax * 0.42, neck_top), (cx + ax * 0.42, neck_top),
-                         (cx + ax * 0.5, shoulder_y), (cx - ax * 0.5, shoulder_y)], np.int32)
-        shoulders = np.array([(cx - ax * 0.5, shoulder_y), (cx + ax * 0.5, shoulder_y),
-                              (cx + ax * 2.0, h * 0.95), (cx + ax * 2.4, h), (cx - ax * 2.4, h),
-                              (cx - ax * 2.0, h * 0.95)], np.int32)
-        shadow = image.copy()
-        cv2.ellipse(shadow, center, (ax, ay), 0, 0, 360, (18, 14, 10), -1, cv2.LINE_AA)
-        cv2.fillPoly(shadow, [neck, shoulders], (18, 14, 10), cv2.LINE_AA)
-        cv2.addWeighted(shadow, 0.28, image, 0.72, 0, dst=image)
+        # มีแค่เส้นกรอบ ไม่ถมเงา ภาพหน้าจะได้ไม่มืดลง
         lines = image.copy()
         cv2.ellipse(lines, center, (ax, ay), 0, 0, 360, color, 2, cv2.LINE_AA)
         for side in (-1, 1):  # เส้นขอบคอและไหล่ซ้าย/ขวา
@@ -1139,6 +1150,7 @@ if ctx.video_processor:
         processor.peak_prominence = peak_prominence
         processor.peak_noise_k = peak_noise_k
         processor.actual_chews = int(actual_chews) if record_actual else None
+        processor.trial_type = trial_type
         # เกณฑ์คำใหม่ต้องสูงกว่าขอบบนของการเคี้ยวชัดเจน ไม่อย่างนั้นเคี้ยวแรงๆ จะกลายเป็นรีเซ็ต
         processor.bite_pct = max(bite_pct, chew_high_pct + 10) / 100
         processor.max_yaw_deg = max_yaw_deg
@@ -1221,6 +1233,42 @@ with meal_panel:
             a1.metric("คลาดเฉลี่ยต่อรอบ", f"{trials['error'].abs().mean():.1f} ครั้ง")
             a2.metric("นับตรงเป๊ะ", f"{(trials['error'] == 0).mean() * 100:.0f}%")
             a3.metric("คลาดไม่เกิน ±1", f"{(trials['error'].abs() <= 1).mean() * 100:.0f}%")
+            # Accuracy ของรอบเคี้ยว = 100 × (1 − |นับได้ − จริง| / จริง) เฉลี่ยรายรอบ (สูตรเดียวกับ tune.py)
+            chew = trials[trials["actual_chews"] > 0]
+            if len(chew):
+                acc = (1 - chew["error"].abs() / chew["actual_chews"]).clip(lower=0) * 100
+                overall = max(0.0, 1 - chew["error"].abs().sum() / chew["actual_chews"].sum()) * 100
+                c1, c2 = st.columns(2)
+                c1.metric("Accuracy (เฉลี่ยรายรอบ)", f"{acc.mean():.1f}%",
+                          help="แต่ละรอบ = 100 × (1 − |นับได้ − จริง| / จริง) เช่น จริง 10 นับได้ 9 = 90%")
+                c2.metric("Accuracy (รวมทุกครั้ง)", f"{overall:.1f}%",
+                          help="1 − ผลรวมความคลาดทุกรอบ / ผลรวมจำนวนจริงทุกรอบ")
+            # เคี้ยวต้องนับ / ไม่เคี้ยวต้องไม่นับ (สูตรเดียวกับ tune.py: อิงจำนวนต่อรอบ)
+            neg = trials[trials["actual_chews"] == 0]
+            tp = int(chew[["chews", "actual_chews"]].min(axis=1).sum()) if len(chew) else 0
+            fn = int((chew["actual_chews"] - chew["chews"]).clip(lower=0).sum()) if len(chew) else 0
+            fp_neg = int(neg["chews"].sum())
+            fp = int((chew["chews"] - chew["actual_chews"]).clip(lower=0).sum()) + fp_neg if len(chew) else fp_neg
+            d1, d2, d3, d4 = st.columns(4)
+            d1.metric("Precision", f"{tp / (tp + fp) * 100:.1f}%" if tp + fp else "–",
+                      help="ที่แอปนับได้ทั้งหมด เป็นการเคี้ยวจริงกี่ % (ต่ำ = นับเกินหรือนับตอนไม่ได้เคี้ยว)")
+            d2.metric("Recall", f"{tp / (tp + fn) * 100:.1f}%" if tp + fn else "–",
+                      help="การเคี้ยวจริงทั้งหมด แอปนับได้กี่ % (ต่ำ = นับขาด)")
+            d3.metric("F1-Score", f"{2 * tp / (2 * tp + fp + fn) * 100:.1f}%" if tp + fn else "–",
+                      help="ค่าเฉลี่ยฮาร์มอนิกของ Precision กับ Recall")
+            if len(neg) and "active_sec" in neg:
+                windows = neg["active_sec"].sum()  # ช่องละ 1 วินาที
+                spec = max(0.0, windows - fp_neg) / windows * 100 if windows > 0 else None
+                d4.metric("Specificity", "–" if spec is None else f"{spec:.1f}%",
+                          help="ช่วงที่ไม่ได้เคี้ยว (นั่งนิ่ง/พูดคุย แบ่งช่องละ 1 วินาที) แอปไม่นับกี่ % "
+                               f"— นับผิด {fp_neg / (windows / 60):.1f} ครั้ง/นาที" if windows > 0 else None)
+            else:
+                d4.metric("Specificity", "–", help="ต้องมีรอบนั่งนิ่งหรือพูดคุยในโหมดทดลอง")
+            if "trial_type" in df and (df["trial_type"] == "talk").any():
+                talk = df[df["trial_type"] == "talk"]
+                t1, t2 = st.columns(2)
+                t1.metric("พูดคุย: นับผิดเฉลี่ยต่อรอบ", f"{talk['chews'].mean():.1f} ครั้ง")
+                t2.metric("พูดคุย: รอบที่ไม่นับเลย", f"{(talk['chews'] == 0).mean() * 100:.0f}%")
         st.dataframe(df, use_container_width=True, hide_index=True)
         st.caption(f"ชื่อไฟล์: `{file_name}` ถ้าเปลี่ยนการตั้งค่า ให้บันทึกแล้วกดเริ่มมื้อใหม่ก่อน "
                    "ไฟล์หนึ่งจะได้มีแต่ผลของการตั้งค่าเดียว")
