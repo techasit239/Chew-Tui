@@ -1,0 +1,75 @@
+{
+  "created": "2026-11-10 16:32:15",
+  "n_trials": 63,
+  "settings": {
+    "method": "peaks",
+    "enabled": [
+      "chin_v",
+      "chin_h"
+    ],
+    "chew_low_pct": 0.98,
+    "chew_high_pct": 1.04,
+    "thresholds": {
+      "chin_v": 0.05,
+      "chin_h": 0.03,
+      "cheeks": 0.03
+    },
+    "peak_band": [
+      0.7,
+      3.5
+    ],
+    "peak_prominence": 0.8,
+    "peak_noise_k": 7.0,
+    "bite_pct": 1.9
+  },
+  "metrics": {
+    "best": {
+      "train": {
+        "score": 2.52,
+        "mae": 2.7,
+        "exact_pct": 40.9,
+        "within1_pct": 56.8,
+        "n": 44
+      },
+      "test": {
+        "score": 1.348,
+        "mae": 1.63,
+        "exact_pct": 52.6,
+        "within1_pct": 78.9,
+        "n": 19
+      }
+    },
+    "current": {
+      "train": {
+        "score": 3.16,
+        "mae": 3.09,
+        "exact_pct": 36.4,
+        "within1_pct": 52.3,
+        "n": 44
+      },
+      "test": {
+        "score": 3.043,
+        "mae": 3.11,
+        "exact_pct": 26.3,
+        "within1_pct": 63.2,
+        "n": 19
+      }
+    },
+    "default": {
+      "train": {
+        "score": 3.16,
+        "mae": 3.09,
+        "exact_pct": 36.4,
+        "within1_pct": 52.3,
+        "n": 44
+      },
+      "test": {
+        "score": 3.043,
+        "mae": 3.11,
+        "exact_pct": 26.3,
+        "within1_pct": 63.2,
+        "n": 19
+      }
+    }
+  }
+}

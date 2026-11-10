@@ -1,0 +1,11 @@
+# ข้อมูลส่วนตัวจากการทดลอง (สัญญาณใบหน้ารายเฟรมและตารางผล) ไม่ขึ้น GitHub
+data/raw/
+data/raw_excluded/
+data/*.csv
+
+# ค่าลับ เช่น TURN server
+.streamlit/secrets.toml
+
+__pycache__/
+*.pyc
+.claude/

@@ -1,0 +1,14 @@
+# เวอร์ชันที่ทดสอบแล้ว (ใช้ Python 3.11 หรือ 3.12)
+streamlit==1.60.0
+streamlit-webrtc==0.79.0
+aiortc==1.15.0
+av==17.1.0
+# 0.10.21 เป็นรุ่นท้ายๆ ที่ยังมี mp.solutions (รุ่น 1.x เอาออกแล้ว) และต้องใช้ numpy 1.x
+mediapipe==0.10.21
+numpy==1.26.4
+# ให้ตรงกับ opencv-contrib-python ที่ mediapipe ติดตั้งมาด้วย จะได้ไม่ชนกัน
+opencv-python-headless==4.11.0.86
+# ฟิลเตอร์ความถี่และหายอดคลื่น
+scipy==1.17.1
+pandas==3.0.6
+pillow==12.3.0
